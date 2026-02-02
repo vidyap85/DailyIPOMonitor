@@ -1,0 +1,154 @@
+{
+  "name": "Daily US IPO monitor (same-day, >$200M)",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 9
+            }
+          ]
+        }
+      },
+      "id": "758ad5c9-db1f-4f44-a36d-97d0be34ed6b",
+      "name": "Cron (09:00 Dubai)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        704,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://finnhub.io/api/v1/calendar/ipo?from={{$json.nyDate}}&to={{$json.nyDate}}&token={{$env.FINNHUB_TOKEN}}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "6a26db9b-2e76-47b4-986a-fbbacea087b1",
+      "name": "HTTP Request (IPO Calendar)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1216,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "=",
+        "toEmail": "=",
+        "subject": "IPO Alerts",
+        "text": "={{$json.bodyText}}",
+        "options": {}
+      },
+      "id": "62c8f1a0-b2a2-4ebb-b97d-4be1847cdcd5",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        -112
+      ],
+      "webhookId": "7b6cb152-7348-47f8-82a8-024a77d8a722",
+      "credentials": {
+        "smtp": {
+          "id": "eAJVnMNO7EabuXgb",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const token = 'd6050rhr01qihi8ogdmgd6050rhr01qihi8ogdn0';\nif (!token) {\n  throw new Error(\"Missing FINNHUB_TOKEN env var. Add it to docker-compose and restart the container.\");\n}\n\n// Format YYYY-MM-DD for America/New_York without any extra libraries\nconst nyDate = new Intl.DateTimeFormat(\"en-CA\", {\n  timeZone: \"America/New_York\",\n  year: \"numeric\",\n  month: \"2-digit\",\n  day: \"2-digit\",\n}).format(new Date());\n\nconst url = `https://finnhub.io/api/v1/calendar/ipo?from=${nyDate}&to=${nyDate}&token=${token}`;\n\nreturn [{ json: { nyDate, url } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        -112
+      ],
+      "id": "5b063dc1-5dcb-4a2a-a86b-baccbfa7bc7b",
+      "name": "Build Request (US/Eastern date)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filters same-day IPOs and keeps those with offer amount > $200M\n\nconst minOfferAmountUsd = 200_000;\n\nconst nyDate = new Intl.DateTimeFormat(\"en-CA\", {\n  timeZone: \"America/New_York\",\n  year: \"numeric\",\n  month: \"2-digit\",\n  day: \"2-digit\",\n}).format(new Date());\n\nfunction parsePrice(price) {\n  if (price === null || price === undefined) return null;\n  if (typeof price === \"number\") return price;\n  if (typeof price === \"string\") {\n    const cleaned = price.trim().replace(/[^0-9.\\-]/g, \"\");\n    if (cleaned.includes(\"-\")) {\n      const parts = cleaned\n        .split(\"-\")\n        .map((p) => parseFloat(p))\n        .filter((n) => !Number.isNaN(n));\n      if (parts.length >= 2) return (parts[0] + parts[1]) / 2;\n    }\n    const n = parseFloat(cleaned);\n    return Number.isNaN(n) ? null : n;\n  }\n  return null;\n}\n\nfunction parseShares(obj) {\n  const candidates = [\n    obj.numberOfShares,\n    obj.shares,\n    obj.sharesOffered,\n    obj.totalSharesOffered,\n    obj.shareCount,\n  ];\n  for (const c of candidates) {\n    if (c === null || c === undefined) continue;\n    const n =\n      typeof c === \"number\"\n        ? c\n        : parseFloat(String(c).replace(/[^0-9.]/g, \"\"));\n    if (!Number.isNaN(n) && n > 0) return n;\n  }\n  return null;\n}\n\nfunction getTicker(obj) {\n  return obj.symbol || obj.ticker || obj.companySymbol || obj.code || null;\n}\n\nfunction getDate(obj) {\n  return obj.date || obj.ipoDate || obj.pricingDate || obj.listingDate || null;\n}\n\n// ✅ IMPORTANT: Collect IPOs from ALL incoming items (not only items[0])\nlet ipos = [];\nfor (const it of items) {\n  const body = it.json ?? {};\n  const arr = body.ipoCalendar || body.ipo || body.data || [];\n  if (Array.isArray(arr)) ipos = ipos.concat(arr);\n}\n\nconst matches = [];\n\nfor (const ipo of ipos) {\n  const ipoDate = getDate(ipo);\n  if (!ipoDate) continue;\n  if (String(ipoDate).slice(0, 10) !== nyDate) continue; // same-day only\n\n  const ticker = getTicker(ipo);\n  if (!ticker) continue;\n\n  // Prefer direct offer amount if present\n  const directOffer =\n    ipo.offerAmount ||\n    ipo.offer_amount ||\n    ipo.totalOfferAmount ||\n    ipo.grossProceeds ||\n    ipo.proceeds;\n\n  let offerAmount = null;\n\n  if (directOffer !== null && directOffer !== undefined) {\n    const n =\n      typeof directOffer === \"number\"\n        ? directOffer\n        : parseFloat(String(directOffer).replace(/[^0-9.]/g, \"\"));\n    if (!Number.isNaN(n)) offerAmount = n;\n  }\n\n  // Else compute price * shares\n  const priceRaw =\n    ipo.price ||\n    ipo.ipoPrice ||\n    ipo.offerPrice ||\n    ipo.priceRange ||\n    ipo.price_range ||\n    null;\n\n  const price = parsePrice(priceRaw);\n  const shares = parseShares(ipo);\n\n  if (offerAmount === null && price !== null && shares !== null) {\n    offerAmount = price * shares;\n  }\n\n  if (offerAmount !== null && offerAmount > minOfferAmountUsd) {\n    matches.push({\n      ticker,\n      offerAmount,\n      price: priceRaw,\n      shares, // ✅ use parsed shares (correct field)\n    });\n  }\n}\n\nmatches.sort((a, b) => b.offerAmount - a.offerAmount);\n\nconst subject = `US IPOs today (${nyDate}) with offer amount > $200M`;\n\nconst lines = matches.length\n  ? matches.map(\n      (m) =>\n        `- ${m.ticker} | offer≈$${Math.round(m.offerAmount).toLocaleString(\n          \"en-US\"\n        )} | price=${m.price ?? \"n/a\"} | shares=${m.shares ?? \"n/a\"}`\n    )\n  : [`No same-day US IPOs matched the > $200M condition for ${nyDate}.`];\n\nreturn [\n  {\n    json: {\n      nyDate,\n      subject,\n      bodyText: lines.join(\"\\n\"),\n      tickers: matches.map((m) => m.ticker),\n      matches,\n    },\n  },\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1632,
+        -112
+      ],
+      "id": "6263f3c2-93c2-4963-82a6-1c5be8ff5bea",
+      "name": "Filter & Format Email"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cron (09:00 Dubai)": {
+      "main": [
+        [
+          {
+            "node": "Build Request (US/Eastern date)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request (IPO Calendar)": {
+      "main": [
+        [
+          {
+            "node": "Filter & Format Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Request (US/Eastern date)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request (IPO Calendar)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Format Email": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Dubai",
+    "saveDataErrorExecution": "all",
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "errorWorkflow": "tc34isd6AMZNiOYn"
+  },
+  "versionId": "ab05d237-ec22-45a9-b13d-1d1cf981af77",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f3dca456a844287d5e1b4d8ec24cb4b6dfc9b5b75f88f497493d3fdea840c5a8"
+  },
+  "id": "w6xqWkOw550ra3Sh",
+  "tags": []
+}
